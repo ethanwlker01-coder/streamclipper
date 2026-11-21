@@ -66,14 +66,14 @@ def test_is_offline_timeout_is_retryable(monkeypatch):
 
 def test_ytdlp_hls_uses_configured_cookie_file(monkeypatch, tmp_path):
     cookie_file = tmp_path / "cookies.txt"
-    cookie_file.write_text("# Netscape HTTP Cookie File\\n", encoding="utf-8")
+    cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
     monkeypatch.setenv("STREAMCLIPPER_YTDLP_COOKIES", str(cookie_file))
     monkeypatch.setattr(ingest, "ytdlp_cmd", lambda: ["yt-dlp"])
     seen = {}
 
     def run(cmd, **kwargs):
         seen["cmd"] = cmd
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="https://example.test/live.m3u8\\n", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="https://example.test/live.m3u8\n", stderr="")
 
     monkeypatch.setattr(ingest.subprocess, "run", run)
     assert ingest.ytdlp_hls("https://youtube.com/watch?v=test") == "https://example.test/live.m3u8"
