@@ -324,10 +324,14 @@ class Ingest:
                         self._close_logs(self._procs)
                 time.sleep(1.5)  # the segment muxer writes the last list line on exit
                 produced = len(self.ring.segments) > n_before or _csv_lines(csv_path) > 0
+                used_hls_url = hls_url is not None
+                if used_hls_url:
+                    # Signed media URLs expire; resolve a fresh one on the next reconnect.
+                    hls_url = None
                 if self.kind == "file":
                     self.end_reason = "the source file has been played to the end"
                     break
-                if self.kind in ("youtube", "kick") and not produced and hls_url is None:
+                if self.kind in ("youtube", "kick") and not produced and not used_hls_url:
                     try:
                         hls_url = ytdlp_hls(self.url)
                     except ToolError as e:
