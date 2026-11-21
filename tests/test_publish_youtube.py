@@ -1,6 +1,7 @@
 import base64
 import http.client
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
@@ -186,6 +187,7 @@ def test_client_file_checks(tmp_path):
 def test_loopback_sign_in_with_pkce_and_state(tmp_path):
     client = yt.load_client(_client_file(tmp_path))
     seen = {}
+    page_received = threading.Event()
 
     def token_endpoint(method, url, headers, body):
         seen["form"] = {k: v[0] for k, v in parse_qs(body.decode()).items()}
@@ -207,9 +209,11 @@ def test_loopback_sign_in_with_pkce_and_state(tmp_path):
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         c.request("GET", f"/?state={q['state']}&code=4/CODE-123&scope=x")
         seen["page"] = c.getresponse().read()
+        page_received.set()
 
     t = MockTransport(token_endpoint)
     tok = yt.authorize(client, t, open_browser=browser, timeout=10)
+    assert page_received.wait(timeout=5), "browser callback did not finish"
     a = seen["auth"]
     assert a["code_challenge_method"] == "S256" and a["redirect_uri"].startswith("http://127.0.0.1:")
     assert "youtube.upload" in a["scope"] and a["access_type"] == "offline"
