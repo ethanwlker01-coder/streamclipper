@@ -4,6 +4,7 @@ Every subprocess gets an argument list (never a shell); the URL is always one ar
 """
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -124,10 +125,27 @@ def pipeline_cmds(kind: str, url: str, csv_path: Path, buffer_dir: Path, start_n
     return [sl, ff + ["-i", "pipe:0"] + seg]
 
 
+def _offline_message(message: str) -> bool:
+    """Recognize explicit terminal broadcast states, not generic extraction failures."""
+    msg = str(message or "").lower()
+    markers = (
+        "stream is offline",
+        "stream is currently offline",
+        "broadcast has ended",
+        "this live event has ended",
+        "the live stream has ended",
+        "not currently live",
+        "this event has ended",
+    )
+    return any(marker in msg for marker in markers)
+
+
 def is_offline(kind: str, url: str) -> bool:
-    """True when streamlink finds no playable stream (the broadcast has ended)."""
-    if kind in ("file", "hls"):
-        return kind == "file"
+    """True only when the source explicitly reports that its broadcast has ended."""
+    if kind == "file":
+        return True
+    if kind == "hls":
+        return False
     try:
         res = subprocess.run(
             streamlink_cmd() + ["--json", url],
@@ -135,26 +153,53 @@ def is_offline(kind: str, url: str) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=30,
         )
     except (subprocess.TimeoutExpired, OSError, ToolError):
         return False
-    out = (res.stdout or "").lower()
-    return '"error"' in out and ("no playable streams" in out or "offline" in out or "no streams" in out)
+    try:
+        payload = json.loads(res.stdout or "{}")
+        message = payload.get("error", "") if isinstance(payload, dict) else ""
+    except (TypeError, ValueError):
+        message = ""
+    return _offline_message(message)
 
 
 def ytdlp_hls(url: str) -> str:
-    """Direct HLS URL of a live stream via yt-dlp -g (fallback when streamlink fails). Never printed."""
-    res = subprocess.run(
-        ytdlp_cmd() + ["-g", "-f", "best[height<=1080]", url],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=120,
-    )
+    """Resolve a live HLS URL; optional auth uses the existing STREAMCLIPPER_YTDLP_COOKIES setting."""
+    cmd = ytdlp_cmd()
+    cookie_file = os.environ.get("STREAMCLIPPER_YTDLP_COOKIES", "").strip()
+    if cookie_file and not Path(cookie_file).is_file():
+        raise ToolError(
+            "The file configured by STREAMCLIPPER_YTDLP_COOKIES does not exist.",
+            "set it to a readable Netscape-format cookies.txt file, or unset the variable",
+        )
+    if cookie_file and "--cookies" not in cmd:
+        cmd += ["--cookies", cookie_file]
+    cmd += [
+        "--no-warnings", "--no-playlist", "--socket-timeout", "20", "--retries", "2",
+        "-g", "-f", "best[height<=1080]/best", url,
+    ]
+    try:
+        res = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise ToolError(
+            "yt-dlp timed out while resolving the live stream.",
+            "check the network and retry; authentication failures are not treated as offline",
+        ) from None
     lines = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip().startswith("http")]
-    return lines[0] if lines else ""
+    if res.returncode != 0 or not lines:
+        detail = "\\n".join((res.stderr or res.stdout or "").strip().splitlines()[-6:])
+        if _offline_message(detail):
+            return ""
+        if any(term in detail.lower() for term in ("sign in", "login", "authentication", "cookies", "private video")):
+            hint = "provide a valid Netscape-format cookies.txt via STREAMCLIPPER_YTDLP_COOKIES; never share the cookie file"
+        else:
+            hint = "check the URL, network connection and yt-dlp version, then retry"
+        raise ToolError("yt-dlp could not resolve the live stream" + (f":\\n{detail}" if detail else "."), hint)
+    return lines[0]
 
 
 class Ingest:
@@ -283,12 +328,16 @@ class Ingest:
                     self.end_reason = "the source file has been played to the end"
                     break
                 if self.kind in ("youtube", "kick") and not produced and hls_url is None:
-                    hls_url = ytdlp_hls(self.url)
+                    try:
+                        hls_url = ytdlp_hls(self.url)
+                    except ToolError as e:
+                        # Authentication, extractor and network failures do not prove the stream is offline.
+                        print(f"Live: yt-dlp fallback failed: {e}")
+                        hls_url = None
                     if hls_url:
                         print("Live: streamlink gave no video; using yt-dlp's HLS link instead.")
                         attempt += 1
                         continue
-                    hls_url = None
                 if is_offline(self.kind, self.url):
                     self.end_reason = "the stream is offline"
                     break
